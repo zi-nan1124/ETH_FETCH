@@ -41,9 +41,19 @@ class Calculator:
                 "inputs": [],
                 "name": "decimals",
                 "outputs": [{"name": "", "type": "uint8"}],
-                "type": "function",
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "constant": True,
+                "inputs": [],
+                "name": "symbol",
+                "outputs": [{"name": "", "type": "string"}],
+                "stateMutability": "view",
+                "type": "function"
             }
         ]
+
         self.pool_abi = [
         {
             "inputs": [],
@@ -98,41 +108,21 @@ class Calculator:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df.set_index("timestamp", inplace=True)
 
-        # 定义常见稳定币的 token 地址
-        stablecoins = {
-            "0xdac17f958d2ee523a2206206994597c13d831ec7": "usdt",  # Tether
-            "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "usdc",  # USD Coin
-            "0x6b175474e89094c44da98b954eedeac495271d0f": "dai",  # DAI
-            "0x0000000000085d4780b73119b644ae5ecd22b376": "tusd"  # TrueUSD
-        }
+
         # 使用 pool_address 获取 token0 和 token1 地址
         pool_contract = self.web3.eth.contract(address=self.pooladdress, abi=self.pool_abi)
         token0_address = pool_contract.functions.token0().call()
         token1_address = pool_contract.functions.token1().call()
 
-        # 确定哪个 token 是稳定币
-        token0_is_stable = token0_address.lower() in stablecoins
-        token1_is_stable = token1_address.lower() in stablecoins
-
-        if token0_is_stable and not token1_is_stable:
-            flag = "token0"  # token0 是稳定币
-        elif token1_is_stable and not token0_is_stable:
-            flag = "token1"  # token1 是稳定币
-        else:
-            self.log("[ERROR] No stable coins found or multiple stable coins in the pair.")
-            raise ValueError("Invalid token pair: no single stablecoin identified.")
-
         # 获取 tokenA 和 tokenB 的 decimals
         contract0 = self.web3.eth.contract(address=token0_address, abi=self.token_abi)
+        symbol0= contract0.functions.symbol().call()
         decimals0 = contract0.functions.decimals().call()
         contract1 = self.web3.eth.contract(address=token1_address, abi=self.token_abi)
         decimals1 = contract1.functions.decimals().call()
+        symbol1= contract1.functions.symbol().call()
 
         if self.dex == "uniswap_v3":
-            # 如果开启日志记录，则保存原始数据
-            if self.enable_logging:
-                df.to_csv("step_0_raw_data.csv", index=False)
-
             # 转换为数值类型
             df["amount0"] = pd.to_numeric(df["amount0"], errors="coerce")
             df["amount1"] = pd.to_numeric(df["amount1"], errors="coerce")
@@ -144,83 +134,49 @@ class Calculator:
                 print_error("[ERROR] Non-numeric values found in 'amount1'")
             self.log(f"amount0 dtype: {df['amount0'].dtype}, amount1 dtype: {df['amount1'].dtype}")
 
-            # 如果开启日志记录，则保存数据类型转换后的数据
-            if self.enable_logging:
-                df.to_csv("step_1_numeric_data.csv", index=False)
-
             # 交易量计算
-            if flag == "token0":  # token0 为稳定币
-                df["volume_stablecoin"] = abs(df["amount0"]) / 10**(decimals0)  # 稳定币交易量
-                df["volume_unstablecoin"] = abs(df["amount1"]) / 10**(decimals1)  # 非稳定币交易量
-            else:  # token1 为稳定币
-                df["volume_stablecoin"] = abs(df["amount1"]) / 10**(decimals1)  # 稳定币交易量
-                df["volume_unstablecoin"] = abs(df["amount0"]) / 10**(decimals0)  # 非稳定币交易量
+            df["volume0"] = df["amount0"].abs() / (10 ** decimals0)
+            df["volume1"] = df["amount1"].abs() / (10 ** decimals1)
+            df["symbol0"] = symbol0
+            df["symbol1"] = symbol1
 
-            # 如果开启日志记录，则保存交易量计算后的数据
-            if self.enable_logging:
-                df.to_csv("step_2_volume_calculated.csv", index=False)
-
-            # 计算价格
-            df["price"] = df["volume_stablecoin"] / df["volume_unstablecoin"]
-
-            # 如果开启日志记录，则保存价格计算后的数据
-            if self.enable_logging:
-                df.to_csv("step_3_price_calculated.csv", index=False)
-
-            # 按时间间隔分组并计算交易量和平均价格
+            # 按时间间隔分组并计算交易量
             grouped = df.resample(self.interval).agg({
-                "volume_stablecoin": "sum",  # 稳定币交易量之和
-                "price": "mean",  # 价格的平均值
-                "transactionHash": lambda x: hashlib.sha256(''.join(x).encode()).hexdigest()  # 拼接交易哈希并进行 SHA256 哈希
+                "volume0": "sum",
+                "volume1": "sum",
+                "transactionHash": lambda x: hashlib.sha256(''.join(x).encode()).hexdigest()
             })
 
-            # 如果开启日志记录，则保存分组后的数据
-            if self.enable_logging:
-                grouped.to_csv("step_4_grouped_data.csv")
+            # 重命名 transactionHash 列
+            grouped.rename(columns={"transactionHash": "transactionHashHash"}, inplace=True)
 
-            # 重命名列
-            grouped.rename(columns={
-                "volume_stablecoin": "volume",  # 稳定币交易量
-                "price": "price",  # 平均价格
-                "transactionHash": "transactionHashHash"  # SHA256 哈希后的交易哈希列
-            }, inplace=True)
+            # 添加 symbol1 和 symbol2 列
+            grouped["symbol0"] = symbol0
+            grouped["symbol1"] = symbol1
 
-            # 如果开启日志记录，则保存最终结果
-            if self.enable_logging:
-                grouped.to_csv("step_5_final_result.csv")
 
 
         elif self.dex in ["uniswap_v2", "PancakeSwap_v2"]:
-            if self.enable_logging:
-                df.to_csv("step_0_raw_data.csv", index=False)
-            # 如果amount0是稳定币
-            if flag == "token0":  # token0 为稳定币
-                df["volume_stablecoin"] = (abs(df["amount0In"]) + abs(df["amount0Out"])) / 10 ** (decimals0) # 稳定币交易量
-                df["volume_unstablecoin"] = (abs(df["amount1In"]) + abs(df["amount1Out"])) / 10 ** (decimals1)  # 非稳定币交易量
-            else:  # token1 为稳定币
-                df["volume_stablecoin"] = (abs(df["amount1In"]) + abs(df["amount1Out"])) / 10 ** (decimals1)  # 稳定币交易量
-                df["volume_unstablecoin"] = (abs(df["amount0In"]) + abs(df["amount0Out"])) / 10 ** (decimals0)  # 非稳定币交易量
 
-            # 计算价格
-            df["price"] = df["volume_stablecoin"] / df["volume_unstablecoin"]
-            if self.enable_logging:
-                df.to_csv("step_1_price_data.csv", index=False)
+            df["volume0"] = (abs(df["amount0In"]) + abs(df["amount0Out"])) / 10 ** (decimals0) # 稳定币交易量
+            df["volume1"] = (abs(df["amount1In"]) + abs(df["amount1Out"])) / 10 ** (decimals1)  # 非稳定币交易量
+            df["symbol0"] = symbol0
+            df["symbol1"] = symbol1
 
             # 按时间间隔分组并计算交易量和平均价格
             grouped = df.resample(self.interval).agg({
-                "volume_stablecoin": "sum",  # 稳定币交易量
-                "price": "mean",  # 价格的平均值
+                "volume0": "sum",  # 稳定币交易量
+                "volume1": "sum",  # 价格的平均值
                 "transactionHash": lambda x: hashlib.sha256(''.join(x).encode()).hexdigest()  # 拼接交易哈希并进行 SHA256 哈希
             })
 
-            # 重命名列
-            grouped.rename(columns={
-                "volume_stablecoin": "volume",  # 稳定币交易量
-                "price": "price",  # 平均价格
-                "transactionHash": "transactionHashHash"  # SHA256 哈希后的交易哈希列
-            }, inplace=True)
-            if self.enable_logging:
-                df.to_csv("step_2_grouped_data.csv", index=False)
+            # 重命名 transactionHash 列
+            grouped.rename(columns={"transactionHash": "transactionHashHash"}, inplace=True)
+
+            # 添加 symbol1 和 symbol2 列
+            grouped["symbol0"] = symbol0
+            grouped["symbol1"] = symbol1
+
 
         else:
             print_error(f"[ERROR] Unsupported DEX type: {self.dex}")
@@ -230,13 +186,8 @@ class Calculator:
         grouped["starttime"] = grouped.index
         grouped["endtime"] = grouped.index + pd.to_timedelta(self.interval)
         # 根据token0是否是稳定币动态设置 token0 和 token1
-        if flag == "token0":  # token0是稳定币
-            grouped["token0"] = self.tokenAname
-            grouped["token1"] = self.tokenBname
-        else:  # token1是稳定币
-            grouped["token0"] = self.tokenBname
-            grouped["token1"] = self.tokenAname
-
+        self.tokenAname = symbol0
+        self.tokenBname = symbol1
         self.log(f"[INFO] Data processed successfully for DEX: {self.dex}")
         return grouped.reset_index(drop=True)
 
@@ -282,18 +233,14 @@ class Calculator:
         """
         self.log(f"[INFO] Merging data by starttime and endtime.")
 
-        # 过滤掉价格为空的行
-        processed_data = processed_data[processed_data["price"].notna()]
 
         # 按 starttime 和 endtime 分组，交易量求和，价格求平均
-        merged_data = processed_data.groupby(["starttime", "endtime", "token0", "token1"], as_index=False).agg({
-            "volume": "sum",  # 交易量之和
-            "price": "mean",  # 价格平均值
+        merged_data = processed_data.groupby(["starttime", "endtime", "symbol0", "symbol1"], as_index=False).agg({
+            "volume0": "sum",  # 交易量之和
+            "volume1": "sum",  # 价格平均值
             "transactionHashHash": lambda x: hashlib.sha256(''.join(x).encode()).hexdigest()  # 合并交易哈希并计算 SHA256 哈希
         })
 
-        # 检查是否有空的价格，如果有，设置价格为 NaN
-        merged_data["price"] = merged_data["price"].apply(lambda x: x if pd.notna(x) else None)
 
         # 将 transactionHashHash 移动到第一列
         columns = ["transactionHashHash"] + [col for col in merged_data.columns if col != "transactionHashHash"]
@@ -310,6 +257,7 @@ class Calculator:
             self.log(f"[INFO] Starting calculation for DEX: {self.dex}, PAIR: {self.tokenAname}-{self.tokenBname}")
             raw_data = self.load_data()
             processed_data = self.process_data(raw_data)
+            processed_data.to_csv('test.csv', index=False)
             merge_data = self.merge_data(processed_data)
             #merge_data.to_csv('test.csv', index=False)
             self.save_to_csv(merge_data)
